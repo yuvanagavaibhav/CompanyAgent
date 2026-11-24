@@ -13,4 +13,9 @@ def load_pdf(paths):
                 int(d.metadata.get('page', 0)) + 1
             )
         docs.extend(loaded)
-    return docs    
+    return docs  
+
+def clean_documents(docs):
+    for d in docs:
+        d.page_content = " ".join (d.page_content.split())
+    return [d for d in docs if d.page_content.strip()]
