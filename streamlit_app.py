@@ -10,9 +10,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_groq import ChatGroq
+from src.llm import get_llm, extract_text
 
-from src.config import DATA_DIR, INDEX_DIR, GROQ_MODEL, TOP_K
+from src.config import DATA_DIR, INDEX_DIR, TOP_K
 from src.data_ingestion_pipeline import load_pdf, clean_documents, split_documents
 from src.vectorstore import build_vectorstore, save_vectorstore, load_vectorstore
 from src.retrieval import retrieve_documents
@@ -69,19 +69,27 @@ with st.sidebar:
     st.caption("AI-powered Knowledge & Policy Assistant")
     st.markdown("---")
     
-    # API Key check
-    groq_api_key = os.getenv("GROQ_API_KEY")
-    if not groq_api_key:
-        api_key_input = st.text_input("Enter Groq API Key:", type="password")
-        if api_key_input:
-            os.environ["GROQ_API_KEY"] = api_key_input
-            groq_api_key = api_key_input
+    # API Key check (Google Gemini or Groq)
+    has_google = bool(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"))
+    has_groq = bool(os.getenv("GROQ_API_KEY"))
+
+    if not (has_google or has_groq):
+        gemini_input = st.text_input("Enter Google / Gemini API Key:", type="password")
+        if gemini_input:
+            os.environ["GOOGLE_API_KEY"] = gemini_input
+            has_google = True
         else:
-            st.warning("⚠️ GROQ_API_KEY not found in `.env` or input.")
-    
+            groq_input = st.text_input("Or Enter Groq API Key:", type="password")
+            if groq_input:
+                os.environ["GROQ_API_KEY"] = groq_input
+                has_groq = True
+            else:
+                st.warning("⚠️ No API key found. Add `GOOGLE_API_KEY` to `.env` or enter above.")
+
     st.subheader("⚙️ Settings")
+    active_provider = "Google Gemini" if has_google else ("Groq" if has_groq else "None")
+    st.info(f"**Active Provider:** {active_provider}")
     selected_k = st.slider("Retrieved Chunks (Top-K)", min_value=1, max_value=10, value=TOP_K)
-    st.text(f"Model: {GROQ_MODEL}")
     
     st.markdown("---")
     st.subheader("📚 Knowledge Base")
@@ -145,9 +153,9 @@ if user_input:
         st.stop()
 
     # 3. Check prerequisites
-    if not os.getenv("GROQ_API_KEY"):
+    if not (os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("GROQ_API_KEY")):
         with st.chat_message("assistant"):
-            st.error("Please provide a valid GROQ_API_KEY in `.env` or in the sidebar to generate answers.")
+            st.error("Please provide a valid `GOOGLE_API_KEY` or `GROQ_API_KEY` in `.env` or in the sidebar.")
         st.stop()
 
     vectorstore = get_or_create_vectorstore()
@@ -200,9 +208,9 @@ RULES:
     with st.chat_message("assistant"):
         with st.spinner("Generating answer..."):
             try:
-                llm = ChatGroq(model_name=GROQ_MODEL, temperature=0.1)
+                llm = get_llm(temperature=0.1)
                 response = llm.invoke(messages)
-                raw_answer = response.content
+                raw_answer = extract_text(response.content)
                 # Guardrails: Output Validation
                 is_valid_out, answer_content = validate_output(raw_answer, context_text)
                 if not is_valid_out:

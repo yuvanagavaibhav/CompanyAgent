@@ -8,3 +8,4 @@ faiss-cpu
 langchain-groq
 groq
 streamlit
+langchain-google-genai

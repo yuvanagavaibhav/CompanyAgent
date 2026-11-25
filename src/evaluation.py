@@ -14,10 +14,11 @@ load_dotenv()
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
 
-from src.config import INDEX_DIR, GROQ_MODEL, TOP_K
+from src.config import INDEX_DIR, TOP_K
 from src.vectorstore import load_vectorstore
 from src.retrieval import retrieve_documents
 from src.guardrails import validate_input, validate_output
+from src.llm import get_llm, extract_text
 
 EVAL_DATASET_PATH = Path(__file__).resolve().parent.parent / "data" / "eval_dataset.json"
 EVAL_RESULTS_PATH = Path(__file__).resolve().parent.parent / "data" / "eval_results.json"
@@ -115,7 +116,7 @@ CONTEXT:
     
     gen_messages = rag_prompt.format_messages(context=context_text, question=question)
     response = invoke_with_retry(llm, gen_messages)
-    answer = response.content.strip()
+    answer = extract_text(response.content).strip()
     
     # 4. Guardrail Output Validation
     is_valid_out, out_msg = validate_output(answer, context_text)
@@ -134,10 +135,11 @@ CONTEXT:
     )
     
     judge_res = invoke_with_retry(llm, judge_messages)
+    judge_text = extract_text(judge_res.content)
     
     # Robust JSON extraction
     metrics = {}
-    json_match = re.search(r"\{[\s\S]*\}", judge_res.content)
+    json_match = re.search(r"\{[\s\S]*\}", judge_text)
     if json_match:
         try:
             metrics = json.loads(json_match.group(0))
@@ -172,8 +174,8 @@ def run_evaluation_suite():
     print("🚀 STARTING COMPANYAGENT RAG EVALUATION & GUARDRAIL SUITE")
     print("=" * 70)
     
-    if not os.getenv("GROQ_API_KEY"):
-        print("❌ Error: GROQ_API_KEY environment variable is missing.")
+    if not (os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("GROQ_API_KEY")):
+        print("❌ Error: Neither GOOGLE_API_KEY nor GROQ_API_KEY was found in environment.")
         return
         
     if not EVAL_DATASET_PATH.exists():
@@ -186,7 +188,7 @@ def run_evaluation_suite():
     print(f"📁 Loaded {len(dataset)} evaluation benchmarks.")
     print("🔄 Loading FAISS vector store...")
     vectorstore = load_vectorstore(INDEX_DIR)
-    llm = ChatGroq(model_name=GROQ_MODEL, temperature=0.0)
+    llm = get_llm(temperature=0.0)
     
     results = []
     print("\nRunning evaluations (with rate limit pacing)...")

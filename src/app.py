@@ -10,6 +10,7 @@ from src.vectorstore import build_vectorstore, save_vectorstore
 from src.vectorstore import load_vectorstore, get_embeddings
 from src.retrieval import retrieve_documents
 from src.guardrails import validate_input, validate_output
+from src.llm import get_llm, extract_text
 from langchain_core.prompts import ChatPromptTemplate
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
@@ -82,9 +83,9 @@ messages = rag_prompt.format_messages(
     question=question
 )
 
-llm = ChatGroq(model_name="openai/gpt-oss-20b")
+llm = get_llm(temperature=0.0)
 response = llm.invoke(messages)
-raw_answer = response.content
+raw_answer = extract_text(response.content)
 
 # 2. Output Guardrail
 is_valid_out, final_answer = validate_output(raw_answer, context_text)
