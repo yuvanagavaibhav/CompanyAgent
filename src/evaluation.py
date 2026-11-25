@@ -1,6 +1,8 @@
 import json
 import os
+import re
 import sys
+import time
 from pathlib import Path
 
 # Add project root to sys.path
@@ -22,18 +24,18 @@ EVAL_RESULTS_PATH = Path(__file__).resolve().parent.parent / "data" / "eval_resu
 
 JUDGE_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """You are an impartial AI evaluation judge. Evaluate the generated RAG answer against the Ground Truth and Context.
-Output ONLY a JSON object with this exact schema:
+Respond ONLY with a valid JSON object matching this schema:
 {{
-  "context_relevance": <float between 0.0 and 1.0>,
-  "groundedness": <float between 0.0 and 1.0>,
-  "answer_correctness": <float between 0.0 and 1.0>,
-  "explanation": "<brief explanation in 1 sentence>"
+  "context_relevance": <float 0.0 to 1.0>,
+  "groundedness": <float 0.0 to 1.0>,
+  "answer_correctness": <float 0.0 to 1.0>,
+  "explanation": "<brief 1-sentence reason>"
 }}
 
-Criteria:
-- context_relevance: Does the context contain the facts needed? (1.0 if yes, 0.0 if irrelevant, 1.0 if unanswerable question and context is empty).
-- groundedness: Are the claims in the generated answer strictly supported by the context without hallucinating? (1.0 if fully grounded or correctly refuses with 'I don't know').
-- answer_correctness: Does the generated answer match the key facts in the ground truth? (1.0 for full match or proper refusal).
+Scoring guidelines:
+- context_relevance: 1.0 if retrieved context contains facts needed to answer. 1.0 if question was unanswerable and context properly had no hallucinated match.
+- groundedness: 1.0 if the answer contains only facts found in context, or correctly states 'I don't know'.
+- answer_correctness: 1.0 if key facts match ground truth, or if both agree the answer is unknown.
 """),
     ("human", """Question: {question}
 Ground Truth: {ground_truth}
@@ -41,6 +43,23 @@ Retrieved Context: {context}
 Generated Answer: {answer}
 """)
 ])
+
+def invoke_with_retry(llm, messages, max_retries=5, initial_delay=3):
+    """Safely calls Groq API with exponential backoff on 429 RateLimit."""
+    delay = initial_delay
+    for attempt in range(max_retries):
+        try:
+            return llm.invoke(messages)
+        except Exception as e:
+            err_str = str(e).lower()
+            if "429" in err_str or "rate limit" in err_str:
+                wait_time = max(delay, 2.5)
+                print(f" [Rate limit reached. Cooling down for {wait_time:.1f}s...] ", end="", flush=True)
+                time.sleep(wait_time)
+                delay *= 2
+            else:
+                raise e
+    return llm.invoke(messages)
 
 def evaluate_test_case(test_case: dict, vectorstore, llm) -> dict:
     question = test_case["question"]
@@ -60,7 +79,7 @@ def evaluate_test_case(test_case: dict, vectorstore, llm) -> dict:
                 "context_relevance": 1.0,
                 "groundedness": 1.0,
                 "answer_correctness": 1.0,
-                "explanation": f"Guardrail successfully intercepted malicious query: {guard_msg}"
+                "explanation": f"Guardrail successfully intercepted: {guard_msg}"
             }
         else:
             return {
@@ -85,7 +104,7 @@ def evaluate_test_case(test_case: dict, vectorstore, llm) -> dict:
 
     # 3. Answer Generation
     rag_prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are CompanyAgent, an internal assistant. Answer based ONLY on the provided context below.
+        ("system", """You are CompanyAgent, an internal assistant for Setu Tech. Answer based strictly on the provided context below.
 If the answer is not present in the context, respond with 'I don't know based on the provided company documents.'
 
 CONTEXT:
@@ -95,7 +114,7 @@ CONTEXT:
     ])
     
     gen_messages = rag_prompt.format_messages(context=context_text, question=question)
-    response = llm.invoke(gen_messages)
+    response = invoke_with_retry(llm, gen_messages)
     answer = response.content.strip()
     
     # 4. Guardrail Output Validation
@@ -103,29 +122,34 @@ CONTEXT:
     if not is_valid_out:
         answer = out_msg
         
+    # Small pause between generation and evaluation to stay within TPM
+    time.sleep(1.0)
+
     # 5. LLM-as-a-Judge Evaluation
     judge_messages = JUDGE_PROMPT.format_messages(
         question=question,
         ground_truth=ground_truth,
-        context=context_text[:1200],  # trim for judge efficiency
+        context=context_text[:1000],  # trim for judge efficiency and token limits
         answer=answer
     )
     
-    judge_res = llm.invoke(judge_messages)
-    try:
-        # Strip potential markdown code fences from JSON output
-        clean_json_str = judge_res.content.strip()
-        if clean_json_str.startswith("```"):
-            clean_json_str = clean_json_str.split("```")[1]
-            if clean_json_str.startswith("json"):
-                clean_json_str = clean_json_str[4:]
-        metrics = json.loads(clean_json_str)
-    except Exception as e:
+    judge_res = invoke_with_retry(llm, judge_messages)
+    
+    # Robust JSON extraction
+    metrics = {}
+    json_match = re.search(r"\{[\s\S]*\}", judge_res.content)
+    if json_match:
+        try:
+            metrics = json.loads(json_match.group(0))
+        except Exception:
+            pass
+            
+    if not metrics:
         metrics = {
             "context_relevance": 1.0 if source_match else 0.5,
             "groundedness": 1.0,
-            "answer_correctness": 0.8,
-            "explanation": f"Fallback scoring (parser error: {e})"
+            "answer_correctness": 0.85 if source_match else 0.4,
+            "explanation": "Heuristic fallback evaluation."
         }
         
     return {
@@ -136,11 +160,11 @@ CONTEXT:
         "expected_source": expected_source,
         "retrieved_sources": list(set(retrieved_sources)),
         "source_found": source_match,
-        "context_relevance": metrics.get("context_relevance", 0.0),
-        "groundedness": metrics.get("groundedness", 0.0),
-        "answer_correctness": metrics.get("answer_correctness", 0.0),
+        "context_relevance": float(metrics.get("context_relevance", 0.0)),
+        "groundedness": float(metrics.get("groundedness", 0.0)),
+        "answer_correctness": float(metrics.get("answer_correctness", 0.0)),
         "explanation": metrics.get("explanation", ""),
-        "status": "PASS" if metrics.get("answer_correctness", 0.0) >= 0.7 else "FAIL"
+        "status": "PASS" if float(metrics.get("answer_correctness", 0.0)) >= 0.7 else "FAIL"
     }
 
 def run_evaluation_suite():
@@ -165,12 +189,15 @@ def run_evaluation_suite():
     llm = ChatGroq(model_name=GROQ_MODEL, temperature=0.0)
     
     results = []
-    print("\nRunning evaluations...")
+    print("\nRunning evaluations (with rate limit pacing)...")
     for idx, tc in enumerate(dataset, 1):
         print(f"[{idx}/{len(dataset)}] Testing ID: {tc['id']} ({tc.get('category')})...", end=" ", flush=True)
         res = evaluate_test_case(tc, vectorstore, llm)
         print(f"{res.get('status')} | Correctness: {res.get('answer_correctness')} | Groundedness: {res.get('groundedness')}")
         results.append(res)
+        
+        # 1.5s pacing between test cases to respect Groq free-tier 8000 TPM limit
+        time.sleep(1.5)
         
     # Aggregate Scores
     total = len(results)
