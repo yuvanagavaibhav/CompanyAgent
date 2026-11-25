@@ -9,6 +9,7 @@ from src.config import DATA_DIR
 from src.vectorstore import build_vectorstore, save_vectorstore
 from src.vectorstore import load_vectorstore, get_embeddings
 from src.retrieval import retrieve_documents
+from src.guardrails import validate_input, validate_output
 from langchain_core.prompts import ChatPromptTemplate
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
@@ -46,41 +47,48 @@ print("Vector store dimension:", vectorstore.index.d)
 save_vectorstore(vectorstore)
 print("Vector store built and saved successfully.")
 
-#retrieve documents based on a sample question
+# Sample question execution
 question = "What is Setu Tech's remote work and equipment stipend policy?"
-print(f"Retrieving documents for the question: '{question}'")
+print(f"\nProcessing Question: '{question}'")
+
+# 1. Input Guardrail
+is_valid, guard_msg = validate_input(question)
+if not is_valid:
+    print(f"🛡️ Guardrail Alert: {guard_msg}")
+    sys.exit(1)
+
 vectorstore = load_vectorstore()
-
-results = retrieve_documents(vectorstore = vectorstore, question = question)
-
+results = retrieve_documents(vectorstore=vectorstore, question=question)
 print("Retrieved chunks:", len(results))
 
-
+context_text = "\n\n".join([d.page_content for d in results])
 
 rag_prompt = ChatPromptTemplate.from_messages([
-    ("system", """ You are a helpful company assistant that provides information based on the provided documents. Don't hallucinate.
-    
-    RULES:
-    1. Always answer based on the provided documents.
-    2. If the answer is not present in the documents, respond with 'I don't know' or 'The information is not available in the provided documents.
-    3. Do not provide information that is not present in the documents.
-    4. If the question is unrelated to the documents, respond with 'I don't know' or 'The information is not available in the provided),
-    5. If the question is ambiguous, ask for clarification.
+    ("system", """You are CompanyAgent, a helpful assistant for Setu Tech. Answer based strictly on the provided documents.
 
-    Retrieved context : {context}
+CONTEXT:
+{context}
 
-    """),
+RULES:
+1. Always answer based on the provided documents.
+2. If the answer is not present in the documents, respond with 'I don't know based on the provided company documents.'
+3. Do not provide information that is not present in the documents.
+"""),
     ("human", "{question}"),
 ])
 
 messages = rag_prompt.format_messages(
-   context = results,
-   question = question
+    context=context_text,
+    question=question
 )
 
 llm = ChatGroq(model_name="openai/gpt-oss-20b")
 response = llm.invoke(messages)
+raw_answer = response.content
 
-print("\n" + "="* 60)
+# 2. Output Guardrail
+is_valid_out, final_answer = validate_output(raw_answer, context_text)
+
+print("\n" + "=" * 60)
 print("Question:", question)
-print("CompanyAgent says..", response.content)
+print("CompanyAgent says..\n", final_answer)
