@@ -87,16 +87,60 @@ with st.sidebar:
                 st.warning("⚠️ No API key found. Add `GOOGLE_API_KEY` to `.env` or enter above.")
 
     st.subheader("⚙️ Settings")
+    company_name = st.text_input("Company / Organization Name:", value="Setu Tech")
     active_provider = "Google Gemini" if has_google else ("Groq" if has_groq else "None")
     st.info(f"**Active Provider:** {active_provider}")
     selected_k = st.slider("Retrieved Chunks (Top-K)", min_value=1, max_value=10, value=TOP_K)
     
     st.markdown("---")
     st.subheader("📚 Knowledge Base")
+    
+    # Dynamic PDF Upload Section
+    with st.expander("📥 Upload New Documents", expanded=False):
+        replace_all = st.checkbox(
+            "Wipe existing docs (Switch Company)", 
+            value=False,
+            help="Check this if you are onboarding a new company and want to remove previous PDFs."
+        )
+        uploaded_files = st.file_uploader(
+            "Choose PDF files from local machine",
+            type=["pdf"],
+            accept_multiple_files=True
+        )
+        if uploaded_files:
+            if st.button("⚡ Ingest & Index Uploaded PDFs", use_container_width=True):
+                with st.spinner("Saving and indexing documents..."):
+                    if replace_all:
+                        # Clear old PDFs
+                        for old_pdf in DATA_DIR.glob("*.pdf"):
+                            old_pdf.unlink()
+                        # Clear index directory
+                        if INDEX_DIR.exists():
+                            for idx_file in INDEX_DIR.glob("*"):
+                                idx_file.unlink(missing_ok=True)
+
+                    # Save uploaded PDFs to data directory
+                    DATA_DIR.mkdir(parents=True, exist_ok=True)
+                    for uf in uploaded_files:
+                        save_dest = DATA_DIR / uf.name
+                        with open(save_dest, "wb") as f:
+                            f.write(uf.getbuffer())
+
+                    # Rebuild the FAISS index with the new files
+                    rebuild_index()
+                    st.session_state.messages = [
+                        {
+                            "role": "assistant",
+                            "content": f"🎉 Knowledge base updated with {len(uploaded_files)} new document(s)! Ask me anything about them."
+                        }
+                    ]
+                st.success("Successfully ingested and indexed!")
+                st.rerun()
+
     pdf_files = list(DATA_DIR.glob("*.pdf"))
-    st.write(f"**PDFs Found:** {len(pdf_files)}")
+    st.write(f"**Active Documents ({len(pdf_files)}):**")
     for f in pdf_files:
-        st.text(f"• {f.name}")
+        st.caption(f"📄 {f.name}")
         
     if st.button("🔄 Rebuild Vector Index", use_container_width=True):
         rebuild_index()
@@ -118,8 +162,8 @@ if "messages" not in st.session_state:
     ]
 
 # ----------------- Main Chat Header -----------------
-st.title("💼 Setu Tech Knowledge Assistant")
-st.markdown("Ask natural language questions grounded in verified company documents.")
+st.title(f"💼 {company_name} Knowledge Assistant")
+st.markdown(f"Ask natural language questions grounded in verified **{company_name}** documents.")
 
 # Display Chat History
 for msg in st.session_state.messages:
@@ -182,20 +226,20 @@ if user_input:
         for doc in retrieved_docs
     ]
 
-    # 4. Generate Answer with Groq
+    # 4. Generate Answer
     rag_prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are CompanyAgent, a helpful and precise internal assistant for Setu Tech.
+        ("system", f"""You are CompanyAgent, a helpful and precise internal assistant for {company_name}.
 Answer the user's question based strictly on the provided company documents.
 
 CONTEXT:
-{context}
+{{context}}
 
 RULES:
 1. Answer directly and factually using only the provided context.
 2. If the context does not contain enough information to answer the question, clearly respond:
    "I don't know based on the provided company documents."
 3. Do not speculate or make up policies or procedures.
-4. When relevant, cite the specific policy, severity level, or process mentioned.
+4. When relevant, cite the specific policy, section, or document mentioned.
 """),
         ("human", "{question}"),
     ])
